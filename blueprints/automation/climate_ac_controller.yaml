@@ -226,8 +226,8 @@ triggers:
     id: mode_change
 
   # HA reboot
-  - trigger: homeassistant
-    event: start
+  - trigger: event
+    event_type: homeassistant_started
     id: boot
 
 conditions: []
