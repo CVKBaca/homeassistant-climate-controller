@@ -1,0 +1,342 @@
+blueprint:
+  name: Climate AC Controller
+  description: >
+    Controls a split AC unit automatically based on indoor temperature, season,
+    and presence mode.
+
+    Relies on an external input_select (e.g. managed by Hydronic Heating Schedule
+    + Presence Controller blueprints) to determine the current period
+    (Morning/Day/Evening/Night/Away/Holiday). The AC uses separate cooling
+    temperature targets for each period.
+
+    Temperature hysteresis: AC turns ON when indoor temp exceeds the current
+    period's target + on_offset, and turns OFF when it drops below target -
+    off_offset for at least off_delay minutes.
+  domain: automation
+  input:
+    climate_entity:
+      name: AC Climate Entity
+      selector:
+        entity:
+          domain: climate
+    temperature_sensor:
+      name: Indoor Temperature Sensor
+      selector:
+        entity:
+          domain: sensor
+          device_class: temperature
+    on_offset:
+      name: Turn-on offset (°C above target)
+      description: AC turns on when indoor temp exceeds current target + this value.
+      default: 0.4
+      selector:
+        number:
+          min: 0.1
+          max: 2.0
+          step: 0.1
+          unit_of_measurement: "°C"
+          mode: box
+    off_offset:
+      name: Turn-off offset (°C below target)
+      description: AC turns off when indoor temp drops below current target - this value.
+      default: 0.3
+      selector:
+        number:
+          min: 0.1
+          max: 2.0
+          step: 0.1
+          unit_of_measurement: "°C"
+          mode: box
+    off_delay:
+      name: Turn-off delay (minutes)
+      description: How long indoor temp must stay below threshold before AC turns off.
+      default: 120
+      selector:
+        number:
+          min: 5
+          max: 480
+          step: 5
+          unit_of_measurement: "min"
+          mode: box
+    morning_temperature:
+      name: Morning target temperature
+      description: Cooling target for the Morning period.
+      selector:
+        entity:
+          domain: input_number
+    day_temperature:
+      name: Day target temperature
+      description: Cooling target for the Day period.
+      selector:
+        entity:
+          domain: input_number
+    evening_temperature:
+      name: Evening target temperature
+      description: Cooling target for the Evening period.
+      selector:
+        entity:
+          domain: input_number
+    night_temperature:
+      name: Night target temperature
+      description: Cooling target for the Night period.
+      selector:
+        entity:
+          domain: input_number
+    door_sensors:
+      name: Door sensors (optional)
+      description: >
+        Binary sensors for doors/windows. AC will not turn on if any is open.
+        Leave empty if not applicable.
+      default: []
+      selector:
+        entity:
+          domain: binary_sensor
+          multiple: true
+    heating_mode_entity:
+      name: Heating/presence mode entity
+      description: >
+        input_select managed by the Heating Schedule and Presence Controller
+        blueprints. Must contain Morning, Day, Evening, Night, Away and Holiday
+        options. The AC follows this schedule for cooling targets.
+      selector:
+        entity:
+          domain: input_select
+    away_temperature:
+      name: Away mode target temperature (optional)
+      description: >
+        Cooling target when Away mode is active (e.g. 27°C). If not configured,
+        AC stays off in Away mode.
+      default: ""
+      selector:
+        entity:
+          domain: input_number
+    holiday_temperature:
+      name: Holiday mode target temperature (optional)
+      description: >
+        Cooling target when Holiday mode is active (e.g. 29°C — prevents
+        overheating but saves energy). If not configured, AC stays off in
+        Holiday mode.
+      default: ""
+      selector:
+        entity:
+          domain: input_number
+    season_start_month:
+      name: Season start month
+      description: AC will not turn on automatically before this month.
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 12
+          step: 1
+          mode: box
+    season_end_month:
+      name: Season end month
+      description: AC will not turn on automatically after this month.
+      default: 9
+      selector:
+        number:
+          min: 1
+          max: 12
+          step: 1
+          mode: box
+
+variables:
+  climate_entity: !input climate_entity
+  temperature_sensor: !input temperature_sensor
+  on_offset: !input on_offset
+  off_offset: !input off_offset
+  morning_temperature: !input morning_temperature
+  day_temperature: !input day_temperature
+  evening_temperature: !input evening_temperature
+  night_temperature: !input night_temperature
+  door_sensors: !input door_sensors
+  heating_mode_entity: !input heating_mode_entity
+  away_temperature: !input away_temperature
+  holiday_temperature: !input holiday_temperature
+  season_start_month: !input season_start_month
+  season_end_month: !input season_end_month
+
+triggers:
+  # Temperature too high → consider turning on
+  - trigger: template
+    value_template: >
+      {% set in_season = now().month >= season_start_month | int and now().month <= season_end_month | int %}
+      {% if not in_season %}
+        false
+      {% else %}
+        {% set mode = states(heating_mode_entity) %}
+        {% if mode == 'Morning' %}
+          {% set target = states(morning_temperature) | float(0) %}
+        {% elif mode == 'Day' %}
+          {% set target = states(day_temperature) | float(0) %}
+        {% elif mode == 'Evening' %}
+          {% set target = states(evening_temperature) | float(0) %}
+        {% elif mode == 'Night' %}
+          {% set target = states(night_temperature) | float(0) %}
+        {% elif mode == 'Away' and away_temperature != '' %}
+          {% set target = states(away_temperature) | float(0) %}
+        {% elif mode == 'Holiday' and holiday_temperature != '' %}
+          {% set target = states(holiday_temperature) | float(0) %}
+        {% else %}
+          {% set target = 0 %}
+        {% endif %}
+        {{ target > 0 and states(temperature_sensor) | float(0) > target + on_offset | float(0.4) }}
+      {% endif %}
+    id: temp_high
+
+  # Temperature low enough → consider turning off (with delay)
+  - trigger: template
+    value_template: >
+      {% set in_season = now().month >= season_start_month | int and now().month <= season_end_month | int %}
+      {% if not in_season %}
+        {{ is_state(climate_entity, 'cool') }}
+      {% else %}
+        {% set mode = states(heating_mode_entity) %}
+        {% if mode == 'Morning' %}
+          {% set target = states(morning_temperature) | float(0) %}
+        {% elif mode == 'Day' %}
+          {% set target = states(day_temperature) | float(0) %}
+        {% elif mode == 'Evening' %}
+          {% set target = states(evening_temperature) | float(0) %}
+        {% elif mode == 'Night' %}
+          {% set target = states(night_temperature) | float(0) %}
+        {% elif mode == 'Away' and away_temperature != '' %}
+          {% set target = states(away_temperature) | float(0) %}
+        {% elif mode == 'Holiday' and holiday_temperature != '' %}
+          {% set target = states(holiday_temperature) | float(0) %}
+        {% else %}
+          {% set target = 0 %}
+        {% endif %}
+        {{ target == 0 or states(temperature_sensor) | float(0) < target - off_offset | float(0.3) }}
+      {% endif %}
+    for:
+      minutes: !input off_delay
+    id: temp_low
+
+  # Door closed → re-evaluate (maybe AC can turn on now)
+  - trigger: state
+    entity_id: !input door_sensors
+    to: 'off'
+    id: door_closed
+
+  # Mode change — covers time transitions AND person arriving/leaving home
+  - trigger: state
+    entity_id: !input heating_mode_entity
+    id: mode_change
+
+  # HA reboot
+  - trigger: homeassistant
+    event: start
+    id: boot
+
+conditions: []
+
+actions:
+  # Boot: wait before evaluating to let HA settle
+  - if:
+      - condition: trigger
+        id: boot
+    then:
+      - delay:
+          minutes: 2
+
+  - variables:
+      in_season: "{{ now().month >= season_start_month | int and now().month <= season_end_month | int }}"
+      target_temp: >
+        {% set mode = states(heating_mode_entity) %}
+        {% if mode == 'Morning' %}
+          {{ states(morning_temperature) | float(0) }}
+        {% elif mode == 'Day' %}
+          {{ states(day_temperature) | float(0) }}
+        {% elif mode == 'Evening' %}
+          {{ states(evening_temperature) | float(0) }}
+        {% elif mode == 'Night' %}
+          {{ states(night_temperature) | float(0) }}
+        {% elif mode == 'Away' and away_temperature != '' %}
+          {{ states(away_temperature) | float(0) }}
+        {% elif mode == 'Holiday' and holiday_temperature != '' %}
+          {{ states(holiday_temperature) | float(0) }}
+        {% else %}
+          {{ 0 }}
+        {% endif %}
+      indoor_temp: "{{ states(temperature_sensor) | float(0) }}"
+      ac_is_on: "{{ is_state(climate_entity, 'cool') }}"
+      any_door_open: >
+        {% if door_sensors | count > 0 %}
+          {{ expand(door_sensors) | selectattr('state', 'eq', 'on') | list | count > 0 }}
+        {% else %}
+          false
+        {% endif %}
+
+  - choose:
+    # 1. Turn OFF — out of season (immediate)
+    - conditions:
+        - condition: template
+          value_template: "{{ not in_season and ac_is_on }}"
+      sequence:
+        - action: climate.turn_off
+          target:
+            entity_id: !input climate_entity
+
+    # 2. Turn OFF — mode with no temperature configured (immediate)
+    - conditions:
+        - condition: trigger
+          id:
+            - mode_change
+            - boot
+        - condition: template
+          value_template: "{{ target_temp == 0 and ac_is_on }}"
+      sequence:
+        - action: climate.turn_off
+          target:
+            entity_id: !input climate_entity
+
+    # 3. Turn OFF — temperature dropped below threshold
+    - conditions:
+        - condition: trigger
+          id: temp_low
+        - condition: template
+          value_template: "{{ ac_is_on }}"
+      sequence:
+        - action: climate.turn_off
+          target:
+            entity_id: !input climate_entity
+
+    # 4. Update setpoint — AC already running, mode changed
+    - conditions:
+        - condition: trigger
+          id: mode_change
+        - condition: template
+          value_template: "{{ ac_is_on and target_temp > 0 and in_season }}"
+      sequence:
+        - action: climate.set_temperature
+          target:
+            entity_id: !input climate_entity
+          data:
+            temperature: "{{ target_temp }}"
+
+    # 5. Turn ON — all conditions met
+    - conditions:
+        - condition: template
+          value_template: >
+            {{ in_season
+               and target_temp > 0
+               and indoor_temp > target_temp + on_offset | float(0.4)
+               and not ac_is_on
+               and not any_door_open }}
+      sequence:
+        - action: climate.set_hvac_mode
+          target:
+            entity_id: !input climate_entity
+          data:
+            hvac_mode: cool
+        - delay:
+            seconds: 15
+        - action: climate.set_temperature
+          target:
+            entity_id: !input climate_entity
+          data:
+            temperature: "{{ target_temp }}"
+
+mode: single
