@@ -158,61 +158,10 @@ variables:
   season_end_month: !input season_end_month
 
 triggers:
-  # Temperature too high → consider turning on
-  - trigger: template
-    value_template: >
-      {% set in_season = now().month >= season_start_month | int and now().month <= season_end_month | int %}
-      {% if not in_season %}
-        false
-      {% else %}
-        {% set mode = states(heating_mode_entity) %}
-        {% if mode == 'Morning' %}
-          {% set target = states(morning_temperature) | float(0) %}
-        {% elif mode == 'Day' %}
-          {% set target = states(day_temperature) | float(0) %}
-        {% elif mode == 'Evening' %}
-          {% set target = states(evening_temperature) | float(0) %}
-        {% elif mode == 'Night' %}
-          {% set target = states(night_temperature) | float(0) %}
-        {% elif mode == 'Away' and away_temperature != '' %}
-          {% set target = states(away_temperature) | float(0) %}
-        {% elif mode == 'Holiday' and holiday_temperature != '' %}
-          {% set target = states(holiday_temperature) | float(0) %}
-        {% else %}
-          {% set target = 0 %}
-        {% endif %}
-        {{ target > 0 and states(temperature_sensor) | float(0) > target + on_offset | float(0.4) }}
-      {% endif %}
-    id: temp_high
-
-  # Temperature low enough → consider turning off (with delay)
-  - trigger: template
-    value_template: >
-      {% set in_season = now().month >= season_start_month | int and now().month <= season_end_month | int %}
-      {% if not in_season %}
-        {{ is_state(climate_entity, 'cool') }}
-      {% else %}
-        {% set mode = states(heating_mode_entity) %}
-        {% if mode == 'Morning' %}
-          {% set target = states(morning_temperature) | float(0) %}
-        {% elif mode == 'Day' %}
-          {% set target = states(day_temperature) | float(0) %}
-        {% elif mode == 'Evening' %}
-          {% set target = states(evening_temperature) | float(0) %}
-        {% elif mode == 'Night' %}
-          {% set target = states(night_temperature) | float(0) %}
-        {% elif mode == 'Away' and away_temperature != '' %}
-          {% set target = states(away_temperature) | float(0) %}
-        {% elif mode == 'Holiday' and holiday_temperature != '' %}
-          {% set target = states(holiday_temperature) | float(0) %}
-        {% else %}
-          {% set target = 0 %}
-        {% endif %}
-        {{ target == 0 or states(temperature_sensor) | float(0) < target - off_offset | float(0.3) }}
-      {% endif %}
-    for:
-      minutes: !input off_delay
-    id: temp_low
+  # Temperature sensor change → evaluate turn on/off
+  - trigger: state
+    entity_id: !input temperature_sensor
+    id: temp_changed
 
   # Door closed → re-evaluate (maybe AC can turn on now)
   - trigger: state
@@ -229,6 +178,34 @@ triggers:
   - trigger: event
     event_type: homeassistant_started
     id: boot
+
+  # Temp below off-threshold for off_delay minutes → turn off
+  # HA manages the timer: resets automatically if condition stops being true (e.g. mode change shifts target)
+  - trigger: template
+    value_template: >
+      {% set month = now().month %}
+      {% set in_season = month >= season_start_month | int and month <= season_end_month | int %}
+      {% set mode = states(heating_mode_entity) %}
+      {% if mode == 'Morning' %}
+        {% set target = states(morning_temperature) | float(0) %}
+      {% elif mode == 'Day' %}
+        {% set target = states(day_temperature) | float(0) %}
+      {% elif mode == 'Evening' %}
+        {% set target = states(evening_temperature) | float(0) %}
+      {% elif mode == 'Night' %}
+        {% set target = states(night_temperature) | float(0) %}
+      {% elif mode == 'Away' and away_temperature != '' %}
+        {% set target = states(away_temperature) | float(0) %}
+      {% elif mode == 'Holiday' and holiday_temperature != '' %}
+        {% set target = states(holiday_temperature) | float(0) %}
+      {% else %}
+        {% set target = 0 %}
+      {% endif %}
+      {{ in_season and target > 0 and is_state(climate_entity, 'cool')
+         and states(temperature_sensor) | float(0) < target - off_offset | float(0.3) }}
+    for:
+      minutes: !input off_delay
+    id: temp_below_threshold
 
 conditions: []
 
@@ -292,18 +269,7 @@ actions:
           target:
             entity_id: !input climate_entity
 
-    # 3. Turn OFF — temperature dropped below threshold
-    - conditions:
-        - condition: trigger
-          id: temp_low
-        - condition: template
-          value_template: "{{ ac_is_on }}"
-      sequence:
-        - action: climate.turn_off
-          target:
-            entity_id: !input climate_entity
-
-    # 4. Update setpoint — AC already running, mode changed
+    # 3. Update setpoint — AC already running, mode changed
     - conditions:
         - condition: trigger
           id: mode_change
@@ -315,6 +281,17 @@ actions:
             entity_id: !input climate_entity
           data:
             temperature: "{{ target_temp }}"
+
+    # 4. Turn OFF — temp stayed below threshold for off_delay minutes (trigger handles the delay)
+    - conditions:
+        - condition: trigger
+          id: temp_below_threshold
+        - condition: template
+          value_template: "{{ ac_is_on }}"
+      sequence:
+        - action: climate.turn_off
+          target:
+            entity_id: !input climate_entity
 
     # 5. Turn ON — all conditions met
     - conditions:
@@ -339,4 +316,5 @@ actions:
           data:
             temperature: "{{ target_temp }}"
 
-mode: single
+# restart: mode_change or boot interrupts current evaluation immediately
+mode: restart
